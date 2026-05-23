@@ -1,26 +1,60 @@
 """
-tools/registry.py — 工具注册表
+tools/registry.py — 工具注册表（安全设计：最小权限 + MCP 白名单）
 
-对标 Node.js agent-core 的 buildTools()
-- query_wechat: HTTP 调用 Node.js /api/queryWechat
-- search_web: 搜索网页/新闻（Brave Search API，待接入）
+设计原则（方案 B）：
+- 工具注册表保持最小化，只包含明确授权的"只读查询"类工具
+- MCP 接入需白名单审查，禁止带 shell/file/subprocess 工具的 MCP 服务器
+- 每个工具执行前验证在 ALLOWED_MCP_TOOLS 白名单中
+
+已授权工具：
+  ✅ queryWechat — HTTP 调用 Node.js 读取聊天 JSON 文件（只读）
+  ✅ searchWeb   — 调用外部搜索 API（无本地 I/O）
+
+禁止的工具类型：
+  ❌ shell / exec / subprocess
+  ❌ file/read / file/write
+  ❌ 未经白名单审查的 MCP 工具
 """
 
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 import httpx
 
 log = logging.getLogger(__name__)
 
+# ================================================================
+# MCP 白名单配置
+# ================================================================
+
+# MCP 工具白名单（方案 B）
+# 只有在这里登记的工具才能被执行
+# 格式：tool_name -> { "source": "mcp" | "builtin", "description": str }
+ALLOWED_MCP_TOOLS: Dict[str, Dict] = {
+    # 内置工具
+    "queryWechat": {
+        "source": "builtin",
+        "description": "查询微信聊天记录（只读 HTTP 调用）",
+    },
+    # 搜索工具（外部 API，无本地 I/O）
+    "searchWeb": {
+        "source": "mcp",
+        "description": "搜索网页获取信息（只读）",
+    },
+}
+
+# ================================================================
 # Node.js HTTP API 地址
+# ================================================================
+
 HTTP_API_HOST = "localhost"
 HTTP_API_PORT = 3001
 
 
-# ============================================================
-# 工具函数
-# ============================================================
+# ================================================================
+# 工具函数实现
+# ================================================================
 
 async def call_query_wechat_http(
     mode: str = "stats",
@@ -31,18 +65,7 @@ async def call_query_wechat_http(
     limit: int = 2000,
 ) -> str:
     """
-    调用 Node.js HTTP API 查询微信消息记录
-
-    Args:
-        mode: stats | search | detail | images
-        speaker: 发言人
-        room: 群名
-        friend: 好友名
-        query: 搜索关键词
-        limit: 最多条数
-
-    Returns:
-        格式化后的查询结果字符串
+    调用 Node.js HTTP API 查询微信消息记录（只读）
     """
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
@@ -70,9 +93,18 @@ async def call_query_wechat_http(
             return f"⚠️ 查询服务不可用: {e}"
 
 
-# ============================================================
+async def call_search_web(query: str, limit: int = 5) -> str:
+    """
+    搜索网页（调用外部搜索 API，无本地 I/O）
+    TODO: 接入 Brave Search 或其他外部搜索 API
+    """
+    # 占位实现，等接入搜索 API 后填入
+    return f"🔍 搜索功能待接入，当前无法处理: {query}"
+
+
+# ================================================================
 # 工具定义（OpenAI tool_calls 格式）
-# ============================================================
+# ================================================================
 
 TOOLS: List[Dict[str, Any]] = [
     {
@@ -106,21 +138,62 @@ TOOLS: List[Dict[str, Any]] = [
 ]
 
 
-# ============================================================
-# 工具执行器（根据 tool_call 执行对应函数）
-# ============================================================
+# ================================================================
+# MCP 工具注册（方案 B 白名单模式）
+# ================================================================
+
+def register_mcp_tools(mcp_tools: List[Dict[str, Any]]) -> None:
+    """
+    将 MCP 工具注册到 TOOLS 列表（仅白名单中的工具）
+
+    Args:
+        mcp_tools: MCP 服务器返回的工具列表
+    """
+    for tool in mcp_tools:
+        name = tool.get("name", "")
+        if name not in ALLOWED_MCP_TOOLS:
+            log.warning("MCP tool '%s' NOT in whitelist — skipped", name)
+            continue
+        # 白名单中有，但 source 不是 mcp（已内置）则跳过
+        if ALLOWED_MCP_TOOLS[name]["source"] == "builtin":
+            log.debug("MCP tool '%s' is builtin — skipping duplicate registration", name)
+            continue
+        TOOLS.append(tool)
+        log.info("Registered MCP tool: %s", name)
+
+
+# ================================================================
+# 工具执行器（安全验证）
+# ================================================================
 
 async def execute_tool(name: str, arguments: Dict[str, Any]) -> str:
     """
-    根据工具名和参数执行对应工具函数
+    根据工具名和参数执行对应工具函数（白名单验证）
 
-    Args:
-        name: 工具名（如 "queryWechat"）
-        arguments: 参数字典
-
-    Returns:
-        工具执行结果字符串
+    安全设计：
+    1. 工具必须在 ALLOWED_MCP_TOOLS 白名单中
+    2. 参数不包含可疑的路径穿越（如 ../ 路径）
+    3. 参数长度合理（防止注入）
     """
+    # ---- 安全检查 1：白名单验证 ----
+    if name not in ALLOWED_MCP_TOOLS:
+        return f"⛔ 未知工具 '{name}' — 未授权执行（不在白名单中）"
+
+    # ---- 安全检查 2：路径穿越检测 ----
+    for key, value in arguments.items():
+        if isinstance(value, str):
+            # 检测路径穿越尝试
+            if ".." in value or value.startswith("/") or value.startswith("~"):
+                log.warning("Tool '%s' blocked: suspicious path in arg '%s'", name, key)
+                return f"⛔ 参数 '{key}' 含有可疑路径 — 拒绝执行"
+
+    # ---- 安全检查 3：参数长度限制 ----
+    for key, value in arguments.items():
+        if isinstance(value, str) and len(value) > 10000:
+            log.warning("Tool '%s' blocked: arg '%s' too long (%d chars)", name, key, len(value))
+            return f"⛔ 参数 '{key}' 过长（>{10000} 字符）— 拒绝执行"
+
+    # ---- 执行白名单工具 ----
     if name == "queryWechat":
         return await call_query_wechat_http(
             mode=arguments.get("mode", "stats"),
@@ -130,5 +203,11 @@ async def execute_tool(name: str, arguments: Dict[str, Any]) -> str:
             query=arguments.get("query"),
             limit=arguments.get("limit", 2000),
         )
+    elif name == "searchWeb":
+        return await call_search_web(
+            query=arguments.get("query", ""),
+            limit=arguments.get("limit", 5),
+        )
     else:
-        return f"未知工具: {name}"
+        # 理论上不会走到这里（白名单已过滤）
+        return f"⛔ 工具 '{name}' 在白名单中但未实现"
