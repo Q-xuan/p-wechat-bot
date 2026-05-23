@@ -311,54 +311,37 @@ export function buildTools() {
 // ============================================================
 // Session 管理（持久化到文件，进程重启不丢）
 // ============================================================
-// fs 和 path 已从顶部 import
-
 const SESSION_DIR = path.join(process.cwd(), '.data/sessions')
-const SESSION_TTL = 30 * 60 * 1000   // 30 分钟未活跃则过期
-const MAX_TURNS = 10                 // 最多保留 10 轮对话
-const MAX_SESSION_AGE = 7 * 24 * 60 * 60 * 1000  // 7 天彻底删除
+const SESSION_TTL = 30 * 60 * 1000
+const MAX_TURNS = 10
+const MAX_SESSION_AGE = 7 * 24 * 60 * 60 * 1000
 
-// 确保目录存在
 try {
-  mkdirSync(SESSION_DIR, { recursive: true })
+  fs.mkdirSync(SESSION_DIR, { recursive: true })
 } catch {}
 
-/**
- * 加载 session 文件
- * @param {string} sessionId
- * @returns {{ ts: number, turns: Array } | null}
- */
 function loadSessionFile(sessionId) {
   const safeId = sessionId.replace(/[^a-zA-Z0-9_:-]/g, '_')
   const filePath = path.join(SESSION_DIR, `${safeId}.json`)
-  if (!existsSync(filePath)) return null
+  if (!fs.existsSync(filePath)) return null
   try {
-    const raw = readFileSync(filePath, 'utf-8')
+    const raw = fs.readFileSync(filePath, 'utf-8')
     return JSON.parse(raw)
   } catch {
     return null
   }
 }
 
-/**
- * 保存 session 到文件
- * @param {string} sessionId
- * @param {{ ts: number, turns: Array }} entry
- */
 function saveSessionFile(sessionId, entry) {
   const safeId = sessionId.replace(/[^a-zA-Z0-9_:-]/g, '_')
   const filePath = path.join(SESSION_DIR, `${safeId}.json`)
   try {
-    writeFileSync(filePath, JSON.stringify(entry, null, 2), 'utf-8')
+    fs.writeFileSync(filePath, JSON.stringify(entry, null, 2), 'utf-8')
   } catch (e) {
     console.warn('⚠️ session 保存失败:', e.message)
   }
 }
 
-/**
- * 清理过期 session 文件（7 天未活跃或 TTL 过期）
- * 启动时调用一次即可
- */
 export function cleanExpiredSessions() {
   try {
     const files = fs.readdirSync(SESSION_DIR)
@@ -367,7 +350,7 @@ export function cleanExpiredSessions() {
       if (!file.endsWith('.json')) continue
       const filePath = path.join(SESSION_DIR, file)
       try {
-        const raw = readFileSync(filePath, 'utf-8')
+        const raw = fs.readFileSync(filePath, 'utf-8')
         const entry = JSON.parse(raw)
         if (now - entry.ts > MAX_SESSION_AGE || now - entry.ts > SESSION_TTL) {
           fs.unlinkSync(filePath)
@@ -378,7 +361,6 @@ export function cleanExpiredSessions() {
   } catch {}
 }
 
-// 启动时清理一次
 cleanExpiredSessions()
 
 /**

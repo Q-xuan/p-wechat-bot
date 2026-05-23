@@ -36,15 +36,28 @@ MIMO_API_KEY='你的Mimo API Key'
 ### 3. 启动
 
 ```sh
-# 微信扫码登录，消息自动存储并响应
-wb agent --im wechat
+# 方式一：直接运行（调试用）
+./scripts/start.sh
 
-# 或指定 agent
-wb agent --im wechat --agent minimax
-wb agent --im wechat --agent mimo
+# 方式二：PM2 后台运行（推荐，重启不丢登录状态）
+./scripts/start.sh pm2
 ```
 
+> **首次启动**：扫码登录后，登录状态会自动保存到 `WechatEveryDay.memory-card.json`，下次重启不需要再扫码。
+
 终端出现二维码后用微信扫码登录。
+
+## PM2 进程管理
+
+| 命令 | 说明 |
+|------|------|
+| `./scripts/start.sh pm2` | 后台启动 |
+| `./scripts/start.sh stop` | 停止 |
+| `./scripts/start.sh restart` | 重启 |
+| `./scripts/start.sh logs` | 查看最近日志 |
+| `./scripts/start.sh status` | 查看进程状态 |
+
+> **重要**：PM2 进程运行期间，微信登录状态（cookie/session）会持久化到本地文件。进程被 kill 或机器重启后，下次 `pm2 start` 可以跳过扫码直接恢复登录。
 
 ## 支持的 Agent
 
