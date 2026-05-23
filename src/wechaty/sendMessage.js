@@ -54,6 +54,13 @@ export async function defaultMessage(msg, bot, ServiceType = 'GPT') {
       // 生成 sessionId：群名 + 提问者，保证同群同人的上下文连续
       const sessionId = `room:${roomName}::asker:${askerName}`
       console.log('🌸🌸🌸 / question: ', question, '| asker:', askerName, '| room:', roomName, '| session:', sessionId)
+
+      // 先发"思考中"提示（流式输出占位）
+      let thinkingMsg = null
+      try {
+        thinkingMsg = await room.say('🤔 思考中...')
+      } catch {}
+
       const response = await getReply(askerName ? `${askerName}：${question}` : question, {
         roomName,
         askerName,
@@ -61,6 +68,10 @@ export async function defaultMessage(msg, bot, ServiceType = 'GPT') {
       })
       // 群聊回复时加上 @提问者 前缀
       await room.say(`@${askerName} ${response}`)
+      // 删掉"思考中"提示（如果还来得及的话）
+      if (thinkingMsg) {
+        try { await thinkingMsg.delete() } catch {}
+      }
     }
     // 私人聊天，白名单内的直接发送
     // 私人聊天直接匹配自动回复前缀
@@ -68,8 +79,14 @@ export async function defaultMessage(msg, bot, ServiceType = 'GPT') {
       const question = content.replace(`${autoReplyPrefix}`, '')
       const sessionId = `private:${name}`
       console.log('🌸🌸🌸 / content: ', question)
+      // 先发"思考中"提示
+      let thinkingMsg = null
+      try { thinkingMsg = await contact.say('🤔 思考中...') } catch {}
       const response = await getReply(question, { sessionId })
       await contact.say(response)
+      if (thinkingMsg) {
+        try { await thinkingMsg.delete() } catch {}
+      }
     }
   } catch (e) {
     console.error(e)

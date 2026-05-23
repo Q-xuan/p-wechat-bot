@@ -309,26 +309,106 @@ export function buildTools() {
 }
 
 // ============================================================
-// Session 管理
+// Session 管理（持久化到文件，进程重启不丢）
 // ============================================================
-const sessionStore = new Map()
-const SESSION_TTL = 30 * 60 * 1000  // 30 分钟
-const MAX_TURNS = 10                  // 最多保留 10 轮对话
+// fs 和 path 已从顶部 import
 
-export function loadSession(sessionId) {
-  if (!sessionId) return []
-  const entry = sessionStore.get(sessionId)
-  if (!entry) return []
-  if (Date.now() - entry.ts > SESSION_TTL) {
-    sessionStore.delete(sessionId)
-    return []
+const SESSION_DIR = path.join(process.cwd(), '.data/sessions')
+const SESSION_TTL = 30 * 60 * 1000   // 30 分钟未活跃则过期
+const MAX_TURNS = 10                 // 最多保留 10 轮对话
+const MAX_SESSION_AGE = 7 * 24 * 60 * 60 * 1000  // 7 天彻底删除
+
+// 确保目录存在
+try {
+  mkdirSync(SESSION_DIR, { recursive: true })
+} catch {}
+
+/**
+ * 加载 session 文件
+ * @param {string} sessionId
+ * @returns {{ ts: number, turns: Array } | null}
+ */
+function loadSessionFile(sessionId) {
+  const safeId = sessionId.replace(/[^a-zA-Z0-9_:-]/g, '_')
+  const filePath = path.join(SESSION_DIR, `${safeId}.json`)
+  if (!existsSync(filePath)) return null
+  try {
+    const raw = readFileSync(filePath, 'utf-8')
+    return JSON.parse(raw)
+  } catch {
+    return null
   }
-  return entry.turns  // [{role, content}, ...]
 }
 
+/**
+ * 保存 session 到文件
+ * @param {string} sessionId
+ * @param {{ ts: number, turns: Array }} entry
+ */
+function saveSessionFile(sessionId, entry) {
+  const safeId = sessionId.replace(/[^a-zA-Z0-9_:-]/g, '_')
+  const filePath = path.join(SESSION_DIR, `${safeId}.json`)
+  try {
+    writeFileSync(filePath, JSON.stringify(entry, null, 2), 'utf-8')
+  } catch (e) {
+    console.warn('⚠️ session 保存失败:', e.message)
+  }
+}
+
+/**
+ * 清理过期 session 文件（7 天未活跃或 TTL 过期）
+ * 启动时调用一次即可
+ */
+export function cleanExpiredSessions() {
+  try {
+    const files = fs.readdirSync(SESSION_DIR)
+    const now = Date.now()
+    for (const file of files) {
+      if (!file.endsWith('.json')) continue
+      const filePath = path.join(SESSION_DIR, file)
+      try {
+        const raw = readFileSync(filePath, 'utf-8')
+        const entry = JSON.parse(raw)
+        if (now - entry.ts > MAX_SESSION_AGE || now - entry.ts > SESSION_TTL) {
+          fs.unlinkSync(filePath)
+          console.log(`🗑️ 清理过期 session: ${file}`)
+        }
+      } catch {}
+    }
+  } catch {}
+}
+
+// 启动时清理一次
+cleanExpiredSessions()
+
+/**
+ * 加载对话历史（自动取 TTL 过滤）
+ * @param {string} sessionId
+ * @returns {Array} [{role, content}, ...]
+ */
+export function loadSession(sessionId) {
+  if (!sessionId) return []
+  const entry = loadSessionFile(sessionId)
+  if (!entry) return []
+  // TTL 过期则删除文件
+  if (Date.now() - entry.ts > SESSION_TTL) {
+    try {
+      const safeId = sessionId.replace(/[^a-zA-Z0-9_:-]/g, '_')
+      fs.unlinkSync(path.join(SESSION_DIR, `${safeId}.json`))
+    } catch {}
+    return []
+  }
+  return entry.turns
+}
+
+/**
+ * 保存对话历史到文件
+ * @param {string} sessionId
+ * @param {Array} turns
+ */
 export function saveSession(sessionId, turns) {
   if (!sessionId) return
-  sessionStore.set(sessionId, {
+  saveSessionFile(sessionId, {
     ts: Date.now(),
     turns: turns.slice(-MAX_TURNS),
   })
@@ -400,15 +480,25 @@ export function createAgent(apiConfig, options = {}) {
     if (askerName) {
       systemExtra += `\n提问者：${askerName}（群聊回复时无需你加 @，应用层会自动处理）`
     }
-    systemExtra += `\n\n重要规则：\n` +
-      `1. 若需查询微信消息/统计/搜索，调用 queryWechat 工具。\n` +
-      `2. queryWechat 结果已自动压缩（超长内容只返回关键摘要），无需再调用优化工具。\n` +
-      `3. 群聊时应用层会自动在回复前加 @提问者，你只需正常回复内容。\n` +
-      `4. queryWechat 参数选择规则：\n` +
-      `   - 找人/查某人发言记录 → 用 speaker 参数（如"饮歌发了啥"、"歪说了啥"）\n` +
-      `   - 搜包含某关键词的消息 → 用 query 参数（如"有人提到'打球'"）\n` +
-      `   - 同时有人的名字和关键词 → speaker + query 都要传\n` +
-      `   - room 参数默认填当前所在群`
+    systemExtra += `\n\n🛠️ 工具使用规则（重要）：\n` +
+      `【queryWechat】—— 只有当你需要查"谁说了什么"、"群里在聊什么"、"某话题的讨论"时才用。\n` +
+      `不需要查聊天记录时（如闲聊、回答常识、写作等）直接回复，不要调用工具。\n` +
+      `\n` +
+      `【触发词判断】—— 以下场景必须用 queryWechat：\n` +
+      `  - "群里/群里谁..."、"@某人说了什么"、"查一下..."、"统计..."\n` +
+      `  - "有人提到..."、"说说关于..."、"大家觉得..."、"昨天/上周群里..."\n` +
+      `  - "发言记录"、"聊天记录"、"多少人说过"\n` +
+      `  \n` +
+      `【mode 参数选择】：\n` +
+      `  - 想了解"谁发言多、活跃时段"等统计 → mode='stats'\n` +
+      `  - 想找"包含某关键词的消息" → mode='search'（必须传 query 参数）\n` +
+      `  - 想分析"某人说的话有什么特点" → mode='detail'\n` +
+      `  - 想找"图片/视频/附件" → mode='images'\n` +
+      `  - 找人发言记录 → 用 speaker 参数 + mode='stats'\n` +
+      `  \n` +
+      `【room 参数】：默认填当前所在群（由应用层自动注入）。\n` +
+      `【重要】：queryWechat 结果已自动压缩，无需再调用任何优化工具。\n` +
+      `【禁止】：不要在回复末尾加上"已查询微信消息"等说明，结果自己会说话。\n`
 
     const systemPrompt = systemPromptBase + systemExtra
 
