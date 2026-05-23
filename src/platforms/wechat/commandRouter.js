@@ -18,6 +18,15 @@ function parseTarget(tokens) {
     return { friend: value }
   }
 
+  if (['说', '发言', 'talk', 'speaker'].includes(type)) {
+    return { speaker: value }
+  }
+
+  // 显式指定了发言人（如：/分析 @张三）
+  if (type && (type.startsWith('@') || type.startsWith('说'))) {
+    return { speaker: value || type.replace('@', '') }
+  }
+
   return {}
 }
 
@@ -35,7 +44,27 @@ export async function handleWechatCommand(content, context = {}) {
 
   if (['分析', 'analyze', '统计', 'stats'].includes(command)) {
     const statsOnly = ['统计', 'stats'].includes(command)
-    const target = parseTarget(tokens)
+    let target = parseTarget(tokens)
+
+    // 如果 parseTarget 没识别到发言人，尝试从自然语言中提取
+    // 匹配 "xxx的发言"、"xxx说"、"@xxx" 等模式
+    if (!target.speaker && !target.room && !target.friend) {
+      const rest = tokens.slice(1).join(' ')
+
+      // 单token情况（如 "/分析 彭宇的发言" 整体算一个token的情况做兜底）
+      const singlePatterns = [
+        /([\u4e00-\u9fa5]{1,6})的(?:发言|说|聊聊?)/,
+        /([\u4e00-\u9fa5]{1,4})\s+(?:说|发言)/,
+        /@(\S+)/
+      ]
+      for (const p of singlePatterns) {
+        const m = rest.match(p)
+        if (m && m[1] && !['一下', '今天', '昨天', '总结', '分析'].includes(m[1])) {
+          target.speaker = m[1]
+          break
+        }
+      }
+    }
     const result = await analyzeWechatMessages({
       ...target,
       serviceType: context.serviceType,

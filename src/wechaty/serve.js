@@ -18,6 +18,10 @@ export function getServe(serviceType) {
       return lazyServe(() => import('../doubao/index.js'), 'getDoubaoReply')
     case 'deepseek':
       return lazyServe(() => import('../deepseek/index.js'), 'getDeepseekReply')
+    case 'MiniMax':
+      return lazyServe(() => import('../minimax/index.js'), 'getMinimaxReply')
+    case 'Mimo':
+      return lazyServe(() => import('../mimo/index.js'), 'getMimoReply')
     case 'Kimi':
       return lazyServe(() => import('../kimi/index.js'), 'getKimiReply')
     case 'Xunfei':

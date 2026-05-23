@@ -71,13 +71,21 @@ export async function analyzeWechatMessages(options = {}) {
   const records = filterWechatMessages(allRecords, {
     room: options.room,
     friend: options.friend,
+    speaker: options.speaker,
     query: options.query,
     start: options.start,
     end: options.end,
   })
 
   const stats = buildWechatStats(records)
-  const target = options.room ? `群聊「${options.room}」` : options.friend ? `好友「${options.friend}」` : '全部本地记录'
+  const target =
+    options.speaker
+      ? `群友「${options.speaker}」`
+      : options.room
+        ? `群聊「${options.room}」`
+        : options.friend
+          ? `好友「${options.friend}」`
+          : '全部本地记录'
 
   if (options.statsOnly || !records.length) {
     return {

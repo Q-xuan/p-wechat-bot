@@ -75,12 +75,17 @@ export function filterWechatMessages(records, filters = {}) {
   const startTime = filters.start ? new Date(filters.start).getTime() : null
   const endTime = filters.end ? new Date(filters.end).getTime() : null
   const query = filters.query ? filters.query.toLowerCase() : ''
+  const speaker = filters.speaker ? filters.speaker.toLowerCase() : ''
 
   return records.filter((record) => {
     if (filters.room && record.roomName !== filters.room) return false
     if (filters.friend) {
       const names = [record.talkerName, record.talkerAlias, record.receiverName].filter(Boolean)
       if (!names.includes(filters.friend)) return false
+    }
+    if (speaker) {
+      const talker = (record.talkerAlias || record.talkerName || '').toLowerCase()
+      if (!talker.includes(speaker)) return false
     }
     if (
       query &&

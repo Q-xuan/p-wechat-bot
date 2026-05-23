@@ -48,17 +48,27 @@ export async function defaultMessage(msg, bot, ServiceType = 'GPT') {
     // 区分群聊和私聊
     // 群聊消息去掉艾特主体后，匹配自动回复前缀
     if (isRoom && room && content.replace(`${botName}`, '').trimStart().startsWith(`${autoReplyPrefix}`)) {
-      const question = (await msg.mentionText()) || content.replace(`${botName}`, '').replace(`${autoReplyPrefix}`, '') // 去掉艾特的消息主体
-      console.log('🌸🌸🌸 / question: ', question)
-      const response = await getReply(question)
-      await room.say(response)
+      const question = (await msg.mentionText()) || content.replace(`${botName}`, '').replace(`${autoReplyPrefix}`, '')
+      // 获取提问者的名字（talker 的 alias 或 name），用于 @回复 和 sessionId
+      const askerName = (await contact.alias()) || (await contact.name())
+      // 生成 sessionId：群名 + 提问者，保证同群同人的上下文连续
+      const sessionId = `room:${roomName}::asker:${askerName}`
+      console.log('🌸🌸🌸 / question: ', question, '| asker:', askerName, '| room:', roomName, '| session:', sessionId)
+      const response = await getReply(askerName ? `${askerName}：${question}` : question, {
+        roomName,
+        askerName,
+        sessionId,
+      })
+      // 群聊回复时加上 @提问者 前缀
+      await room.say(`@${askerName} ${response}`)
     }
     // 私人聊天，白名单内的直接发送
     // 私人聊天直接匹配自动回复前缀
     if (isAlias && !room && content.trimStart().startsWith(`${autoReplyPrefix}`)) {
       const question = content.replace(`${autoReplyPrefix}`, '')
+      const sessionId = `private:${name}`
       console.log('🌸🌸🌸 / content: ', question)
-      const response = await getReply(question)
+      const response = await getReply(question, { sessionId })
       await contact.say(response)
     }
   } catch (e) {

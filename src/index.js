@@ -17,6 +17,8 @@ export const serveList = [
   { name: 'ChatGPT', value: 'ChatGPT' },
   { name: 'doubao', value: 'doubao' },
   { name: 'deepseek', value: 'deepseek' },
+  { name: 'MiniMax', value: 'MiniMax' },
+  { name: 'Mimo', value: 'Mimo' },
   { name: 'Kimi', value: 'Kimi' },
   { name: 'Xunfei', value: 'Xunfei' },
   { name: 'deepseek-free', value: 'deepseek-free' },
@@ -36,6 +38,10 @@ function getMissingConfig(type) {
       return env.DOUBAO_API_KEY ? [] : ['DOUBAO_API_KEY']
     case 'deepseek':
       return env.DEEPSEEK_API_KEY ? [] : ['DEEPSEEK_API_KEY']
+    case 'MiniMax':
+      return env.MINIMAX_API_KEY ? [] : ['MINIMAX_API_KEY']
+    case 'Mimo':
+      return env.MIMO_API_KEY ? [] : ['MIMO_API_KEY']
     case 'Kimi':
       return env.KIMI_API_KEY ? [] : ['KIMI_API_KEY']
     case 'Xunfei':
