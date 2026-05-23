@@ -9,9 +9,53 @@ import { remark } from 'remark'
 import stripMarkdown from 'strip-markdown'
 import fs from 'fs'
 import path from 'path'
+import http from 'http'
 import { buildWechatStats } from '../analysis/wechatAnalyzer.js'
 import { filterWechatMessages, loadWechatMessages } from '../platforms/wechat/messageStore.js'
 import { getWechatRuntimeConfig } from '../config/env.js'
+
+// HTTP API 服务地址（供工具调用）
+const HTTP_API_HOST = process.env.HTTP_API_HOST || 'localhost'
+const HTTP_API_PORT = process.env.HTTP_API_PORT || '3001'
+
+/**
+ * 通过 HTTP 调用 queryWechat（供 Python Agent 模拟 / 实际使用）
+ * @param {object} params
+ * @returns {Promise<string>} 格式化后的查询结果
+ */
+function callQueryWechatHttp(params) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(params)
+    const options = {
+      hostname: HTTP_API_HOST,
+      port: HTTP_API_PORT,
+      path: '/api/queryWechat',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+      },
+      timeout: 10000,
+    }
+    const req = http.request(options, (res) => {
+      let data = ''
+      res.on('data', chunk => { data += chunk })
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data)
+          if (json.error) reject(new Error(json.error))
+          else resolve(json.result)
+        } catch {
+          reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 100)}`))
+        }
+      })
+    })
+    req.on('error', reject)
+    req.on('timeout', () => { req.destroy(); reject(new Error('HTTP 请求超时')) })
+    req.write(body)
+    req.end()
+  })
+}
 
 // ============================================================
 // 重试工具函数（指数退避）
@@ -553,20 +597,14 @@ export function createAgent(apiConfig, options = {}) {
 
         let result = ''
         if (fn.name === 'queryWechat') {
-          result = await queryWechat(
-            {
-              mode: args.mode || 'stats',
-              speaker: args.speaker,
-              room: args.room,
-              friend: args.friend,
-              query: args.query,
-              limit: args.limit || 2000,
-            },
-            {
-              maxCount: 4,
-              compressFn,
-            }
-          )
+          result = await callQueryWechatHttp({
+            mode: args.mode || 'stats',
+            speaker: args.speaker,
+            room: args.room,
+            friend: args.friend,
+            query: args.query,
+            limit: args.limit || 2000,
+          })
         } else {
           result = `未知工具: ${fn.name}`
         }

@@ -3,6 +3,7 @@ import qrTerminal from 'qrcode-terminal'
 import { defaultMessage } from '../../wechaty/sendMessage.js'
 import { captureWechatMessage } from './messageStore.js'
 import { getWechatRuntimeConfig } from '../../config/env.js'
+import { startHttpApi } from '../../httpApi/server.js'
 
 function onScan(qrcode, status) {
   if (status === ScanStatus.Waiting || status === ScanStatus.Timeout) {
@@ -64,12 +65,13 @@ export function createWechatBot(options = {}) {
   return bot
 }
 
-export function startWechatBot(options = {}) {
+export async function startWechatBot(options = {}) {
+  // Phase 1: 先启动 HTTP API（供 Python Agent 调用 queryWechat）
+  await startHttpApi({ port: Number(process.env.HTTP_API_PORT || 3001) })
+
   const bot = createWechatBot(options)
-  bot
-    .start()
-    .then(() => console.log('Start to log in wechat...'))
-    .catch((error) => console.error('botStart error: ', error))
+  await bot.start()
+  console.log('Start to log in wechat...')
 
   return bot
 }
