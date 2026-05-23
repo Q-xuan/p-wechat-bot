@@ -46,6 +46,24 @@ wb agent --im wechat --agent mimo
 
 终端出现二维码后用微信扫码登录。
 
+## 支持的 Agent
+
+| Agent | 说明 |
+|-------|------|
+| **MiniMax** | MiniMax 模型，需配置 `MINIMAX_API_KEY` |
+| **Mimo** | Mimo 模型，需配置 `MIMO_API_KEY` |
+| **DeepSeek** | DeepSeek 模型，需配置 `DEEPSEEK_API_KEY` |
+| **Pi** | 本地 Pi agent，适合离线场景 |
+| **Ollama** | 本地模型，适合离线场景 |
+
+启动时通过 `--agent` 指定：
+
+```sh
+wb agent --im wechat --agent minimax
+wb agent --im wechat --agent deepseek
+wb agent --im wechat --agent pi
+```
+
 ## 核心功能
 
 启动后，群里 `@机器人` 或私聊发送命令即可：
