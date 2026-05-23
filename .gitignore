@@ -7,4 +7,5 @@ yarn.lock
 Chromium.app
 
 .DS_Store
-.idea.data/wechat/messages.jsonl
+data/wechat/messages.jsonl
+.data/wechat/messages.jsonl
