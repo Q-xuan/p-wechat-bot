@@ -1,0 +1,416 @@
+/**
+ * agent-core — 微信机器人共享 Agent 基础设施
+ *
+ * 包含：ReAct 循环、session 管理、工具注册、数据层、markdown 处理
+ * 被 mimo/minimax 等服务模块继承（传入 API 配置和选项函数）
+ */
+
+import { remark } from 'remark'
+import stripMarkdown from 'strip-markdown'
+import fs from 'fs'
+import path from 'path'
+import { buildWechatStats } from '../analysis/wechatAnalyzer.js'
+import { filterWechatMessages, loadWechatMessages } from '../platforms/wechat/messageStore.js'
+import { getWechatRuntimeConfig } from '../config/env.js'
+
+// ============================================================
+// Markdown 处理
+// ============================================================
+const processor = remark().use(stripMarkdown)
+
+/**
+ * 清理 AI 回复中的各种格式，输出纯文本
+ * @param {string} raw
+ * @returns {string}
+ */
+export function cleanReply(raw) {
+  if (!raw) return ''
+  let text = raw.replace(/<think>[\s\S]*?<\/think>/g, '')
+  text = text.replace(/\*\*(.+?)\*\*/g, '$1')
+  text = text.replace(/\*(.+?)\*/g, '$1')
+  text = text.replace(/`{1,3}(.+?)`{1,3}/gs, '$1')
+  text = text.replace(/^---+$/gm, '')
+  text = text.replace(/^#{1,6}\s+/gm, '')
+  text = processor.processSync(text).toString()
+  return text.trim()
+}
+
+// ============================================================
+// 数据目录
+// ============================================================
+function getDataDir() {
+  try {
+    return getWechatRuntimeConfig().dataDir || '.data/wechat'
+  } catch {
+    return '.data/wechat'
+  }
+}
+
+// ============================================================
+// 数据层：统计摘要构建
+// ============================================================
+export function buildStatsResult(records, target) {
+  const stats = buildWechatStats(records)
+  return [
+    `📊 ${target}`,
+    `消息数：${stats.totalMessages} | 均长：${stats.averageTextLength} 字`,
+    `高频发言：${stats.topSpeakers.slice(0, 5).map(i => `${i.name}(${i.count})`).join('、') || '暂无'}`,
+    stats.hourly.length > 0
+      ? `活跃时段：${stats.hourly.slice(0, 3).map(i => `${i.name}点(${i.count}条)`).join('、')}`
+      : '',
+  ].filter(Boolean).join('\n')
+}
+
+// ============================================================
+// 数据层：消息查询
+// ============================================================
+/**
+ * 查询微信聊天记录。
+ * 支持三种模式：stats / search / detail
+ * 工具内部直接处理压缩，不产生额外 API 调用。
+ *
+ * @param {object} params
+ * @param {string} params.mode      - stats | search | detail
+ * @param {string} [params.speaker] - 发言人（模糊匹配）
+ * @param {string} [params.room]    - 群名（精确匹配）
+ * @param {string} [params.friend]  - 好友名
+ * @param {string} [params.query]    - 搜索关键词
+ * @param {number} [params.limit]    - 最多加载条数
+ * @param {object} [params.options]  - 压缩选项 { maxCount, hint }
+ */
+export async function queryWechat({ speaker, room, friend, query, mode = 'stats', limit = 2000 }, options = {}) {
+  const { maxCount = 4, compressFn } = options
+
+  const allRecords = loadWechatMessages({ dataDir: getDataDir(), limit })
+  const records = filterWechatMessages(allRecords, { speaker, room, friend, query })
+
+  const target =
+    speaker ? `群友「${speaker}」` :
+    room   ? `群聊「${room}」` :
+    friend ? `好友「${friend}」` : '全部记录'
+
+  // ── speaker 查不到 0 条时：fallback 到 query 模式搜包含该词的消息 ──
+  if (records.length === 0 && speaker) {
+    const fallbackRecords = filterWechatMessages(allRecords, { room, query: speaker })
+    if (fallbackRecords.length > 0) {
+      const recent = fallbackRecords.slice(-50)
+      const lines = recent.map(r => {
+        const who = r.talkerAlias || r.talkerName || '?'
+        const text = r.text || `[${r.typeName}]`
+        const time = r.timestamp
+          ? new Date(r.timestamp).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+          : ''
+        return `${time} ${who}: ${text.slice(0, 100)}`
+      })
+      const raw = [
+        `🔍 群聊中提到「${speaker}」的消息 ${fallbackRecords.length} 条：` ,
+        ...lines,
+        fallbackRecords.length > 50 ? `\n...还有 ${fallbackRecords.length - 50} 条` : '',
+      ].join('\n')
+      if (lines.length > 6 && compressFn) {
+        return await compressFn(raw, maxCount, `精炼摘要，包含数量和时间分布`)
+      }
+      return raw
+    }
+  }
+
+  if (records.length === 0) {
+    return `🔍 ${target} — 暂无匹配消息`
+  }
+
+  // ── images 模式：搜图片/视频/附件类消息 ──
+  if (mode === 'images') {
+    const mediaRecords = records.filter(r =>
+      !r.isText || ['Image', 'Video', 'Attachment', 'App'].includes(r.typeName)
+    )
+    if (mediaRecords.length === 0) {
+      return `🖼️ ${target} — 暂无图片/视频/附件记录`
+    }
+    const lines = mediaRecords.slice(-30).map(r => {
+      const who = r.talkerAlias || r.talkerName || '?'
+      const time = r.timestamp
+        ? new Date(r.timestamp).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+        : ''
+      return `${time} ${who}: [${r.typeName}] ${(r.text || '').slice(0, 60)}`
+    })
+    return [
+      `🖼️ ${target} 有 ${mediaRecords.length} 条媒体消息：` ,
+      ...lines,
+    ].join('\n')
+  }
+
+  if (mode === 'search') {
+    const recent = records.slice(-50)
+    const lines = recent.map(r => {
+      const who = r.talkerAlias || r.talkerName || '?'
+      const text = r.text || `[${r.typeName}]`
+      const time = r.timestamp
+        ? new Date(r.timestamp).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+        : ''
+      return `${time} ${who}: ${text.slice(0, 100)}`
+    })
+    const raw = [
+      `🔍 找到 ${records.length} 条${query ? `含「${query}」的` : ''}消息：` ,
+      ...lines,
+      records.length > 50 ? `\n...还有 ${records.length - 50} 条` : '',
+    ].join('\n')
+    if (lines.length > 6 && compressFn) {
+      return await compressFn(raw, maxCount, `精炼摘要，包含数量和时间分布`)
+    }
+    return raw
+  }
+
+  // stats 或 detail
+  const statsText = buildStatsResult(records, target)
+  if (mode === 'stats') {
+    return statsText
+  }
+
+  // detail 模式
+  const sample = records.slice(-30)
+  const samples = sample.map(r => {
+    const who = r.talkerAlias || r.talkerName || '?'
+    const text = r.text || `[${r.typeName}]`
+    return `[${who}] ${text.slice(0, 80)}`
+  }).join('\n')
+
+  const raw = [
+    statsText,
+    '\n最近消息：',
+    samples,
+  ].join('\n')
+
+  if (raw.length > 600 && compressFn) {
+    return await compressFn(raw, maxCount, '简洁概括消息特点和内容分布')
+  }
+  return raw
+}
+
+// ============================================================
+// 工具清单
+// ============================================================
+export function buildTools() {
+  return [
+    {
+      type: 'function',
+      function: {
+        name: 'queryWechat',
+        description: '查询微信聊天记录。可查群聊、查某成员、搜关键词。mode=stats返回统计摘要；mode=search返回匹配的消息列表；mode=detail返回统计+消息样本供分析。结果自动压缩（超长内容只返回关键摘要），无需再调用optimizeReply。',
+        parameters: {
+          type: 'object',
+          properties: {
+            mode: {
+              type: 'string',
+              enum: ['stats', 'search', 'detail', 'images'],
+              description: 'stats=统计摘要(默认)，search=搜文本消息，detail=统计+样本，images=搜图片/视频/附件消息'
+            },
+            speaker: { type: 'string', description: '发言人名字（模糊匹配）' },
+            room:   { type: 'string', description: '群名称（精确匹配）' },
+            friend: { type: 'string', description: '好友名字' },
+            query:  { type: 'string', description: '搜索关键词（仅 mode=search 时必填）' },
+            limit:  { type: 'number', description: '最多加载条数（默认2000）' }
+          },
+          required: ['mode']
+        }
+      }
+    }
+  ]
+}
+
+// ============================================================
+// Session 管理
+// ============================================================
+const sessionStore = new Map()
+const SESSION_TTL = 30 * 60 * 1000  // 30 分钟
+const MAX_TURNS = 10                  // 最多保留 10 轮对话
+
+export function loadSession(sessionId) {
+  if (!sessionId) return []
+  const entry = sessionStore.get(sessionId)
+  if (!entry) return []
+  if (Date.now() - entry.ts > SESSION_TTL) {
+    sessionStore.delete(sessionId)
+    return []
+  }
+  return entry.turns  // [{role, content}, ...]
+}
+
+export function saveSession(sessionId, turns) {
+  if (!sessionId) return
+  sessionStore.set(sessionId, {
+    ts: Date.now(),
+    turns: turns.slice(-MAX_TURNS),
+  })
+}
+
+/**
+ * 从完整 messages 数组中提取纯对话轮次（去掉 tool_calls / tool 结果）
+ * 工具结果不进 session，防止 context 膨胀
+ */
+export function extractDialogTurns(messages) {
+  const turns = []
+  for (const m of messages) {
+    if (m.role === 'system') {
+      turns.push(m)
+    } else if (m.role === 'user') {
+      const text = Array.isArray(m.content)
+        ? m.content.find(c => c.type === 'text')?.text || ''
+        : m.content
+      turns.push({ role: 'user', content: text })
+    } else if (m.role === 'assistant' && !m.tool_calls) {
+      turns.push({ role: 'assistant', content: m.content || '' })
+    }
+    // tool role 和带 tool_calls 的 assistant 消息：跳过，不进入 session
+  }
+  return turns
+}
+
+// ============================================================
+// 核心 Agent 循环
+// ============================================================
+/**
+ * 构建 Agent 实例。
+ *
+ * @param {object} apiConfig       - { openai, chosenModel }
+ * @param {object} options
+ * @param {string} [options.systemPromptBase] - 基础 system prompt
+ * @param {string} [options.modelReasoning]   - 是否为推理模型（影响 reasoning_content 处理）
+ * @param {string} [options.botName]          - 机器人名称（用于 @提及）
+ * @param {function} [options.getReasoningContent] - 从 API 响应提取 reasoning_content
+ * @returns {function} getReply(prompt, options) -> string
+ */
+export function createAgent(apiConfig, options = {}) {
+  const { openai, chosenModel } = apiConfig
+  const {
+    systemPromptBase = '你是黑瑞，微信里的毒舌损友。风格：毒舌、调侃、幽默，该损就损。',
+    modelReasoning = false,
+    botName = '',
+    getReasoningContent = (msg) => msg.reasoning_content || '',
+  } = options
+
+  const availableTools = buildTools()
+
+  return async function getReply(prompt, opts = {}) {
+    const {
+      img_url = '',
+      roomName = '',
+      askerName = '',
+      sessionId = '',
+    } = opts
+
+    // 构建 system prompt
+    let systemExtra = ''
+    if (roomName) {
+      systemExtra += `\n当前所在群：「${roomName}」（查该群消息时 room 参数填"${roomName}"）`
+    }
+    if (askerName) {
+      systemExtra += `\n提问者：${askerName}（群聊回复时无需你加 @，应用层会自动处理）`
+    }
+    systemExtra += `\n\n重要规则：\n` +
+      `1. 若需查询微信消息/统计/搜索，调用 queryWechat 工具。\n` +
+      `2. queryWechat 结果已自动压缩（超长内容只返回关键摘要），无需再调用优化工具。\n` +
+      `3. 群聊时应用层会自动在回复前加 @提问者，你只需正常回复内容。\n` +
+      `4. queryWechat 参数选择规则：\n` +
+      `   - 找人/查某人发言记录 → 用 speaker 参数（如"饮歌发了啥"、"歪说了啥"）\n` +
+      `   - 搜包含某关键词的消息 → 用 query 参数（如"有人提到'打球'"）\n` +
+      `   - 同时有人的名字和关键词 → speaker + query 都要传\n` +
+      `   - room 参数默认填当前所在群`
+
+    const systemPrompt = systemPromptBase + systemExtra
+
+    console.log('🚀🚀🚀 /', prompt.slice(0, 60), '| room:', roomName, '| asker:', askerName)
+
+    // 从 session 恢复对话历史（不含工具结果）
+    const turns = loadSession(sessionId)
+    const messages = []
+    if (turns.length === 0) {
+      messages.push({ role: 'system', content: systemPrompt })
+    } else {
+      const systemTurn = turns.find(t => t.role === 'system')
+      if (systemTurn) messages.push(systemTurn)
+      else messages.push({ role: 'system', content: systemPrompt })
+      for (const t of turns.slice(1)) messages.push(t)
+    }
+
+    // 追加当前用户消息
+    if (img_url && img_url !== '') {
+      messages.push({
+        role: 'user',
+        content: [
+          { type: 'text', text: prompt },
+          { type: 'image_url', image_url: { url: img_url } },
+        ],
+      })
+    } else {
+      messages.push({ role: 'user', content: prompt })
+    }
+
+    // ── ReAct 循环：最多 3 轮 ──────────────────────────────
+    for (let round = 0; round < 3; round++) {
+      const kwargs = {
+        messages,
+        model: chosenModel,
+        max_tokens: 1024,
+        tools: availableTools,
+        tool_choice: 'auto',
+      }
+
+      const response = await openai.chat.completions.create(kwargs)
+      const msg = response.choices[0].message
+
+      // 推理模型需要回传 reasoning_content
+      const reasoningContent = getReasoningContent(msg)
+
+      // ── 无工具调用 → 最终回复 ────────────────────────────
+      if (!msg.tool_calls || msg.tool_calls.length === 0) {
+        const reply = cleanReply(msg.content || '')
+        messages.push({ role: 'assistant', content: reply })
+        saveSession(sessionId, extractDialogTurns(messages))
+        return reply
+      }
+
+      // ── 有工具调用 → 顺序执行每个工具 ───────────────────
+      for (const tc of msg.tool_calls) {
+        const fn = tc.function
+        const args = JSON.parse(fn.arguments || '{}')
+        console.log(`🔧 [${round}] ${fn.name}`, args)
+
+        let result = ''
+        if (fn.name === 'queryWechat') {
+          result = await queryWechat(
+            {
+              mode: args.mode || 'stats',
+              speaker: args.speaker,
+              room: args.room,
+              friend: args.friend,
+              query: args.query,
+              limit: args.limit || 2000,
+            },
+            {
+              maxCount: 4,
+              compressFn: options.compressFn,
+            }
+          )
+        } else {
+          result = `未知工具: ${fn.name}`
+        }
+
+        const assistantMsg = { role: 'assistant', content: null, tool_calls: [tc] }
+        if (modelReasoning && reasoningContent) {
+          assistantMsg.reasoning_content = reasoningContent
+        }
+        messages.push(assistantMsg)
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: result })
+      }
+      // 循环继续，把工具结果给模型，让它判断是否继续或结束
+    }
+
+    // 超轮数限制，取最后一条 assistant 消息
+    const last = messages[messages.length - 1]
+    const fallback = (last?.content && typeof last.content === 'string')
+      ? last.content.slice(0, 300)
+      : '...处理超时'
+    saveSession(sessionId, extractDialogTurns(messages))
+    return fallback
+  }
+}
