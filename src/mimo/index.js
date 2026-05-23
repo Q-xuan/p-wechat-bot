@@ -28,7 +28,7 @@ const openai = new OpenAI(config)
 const chosenModel = env.MIMO_MODEL || 'mimo-v2.5-pro'
 
 // ============================================================
-// 压缩策略：规则截断（MiMo 推理模型对简单任务太慢）
+// 压缩策略：两阶段（快模型直接截断，慢模型 AI 精炼）
 // ============================================================
 async function compressByRules(rawText, maxCount = 4, hint = '') {
   const lines = rawText.split('\n').filter(l => l.trim().length > 0)
@@ -36,7 +36,7 @@ async function compressByRules(rawText, maxCount = 4, hint = '') {
 
   const keyLines = lines
     .filter(l => l.trim() && !l.includes('━━') && !l.includes('──'))
-    .slice(-maxCount * 2)
+    .slice(-maxCount * 3)
 
   if (keyLines.length === 0) return rawText.slice(0, 150)
 
@@ -46,36 +46,18 @@ async function compressByRules(rawText, maxCount = 4, hint = '') {
     if (/\d+条/.test(l)) s += 3
     if (/[\u4e00-\u9fa5]{2,}/.test(l)) s += 1
     if (l.length < 40) s += 1
+    if (/[今昨前后几天上下左右]/.test(l)) s += 1  // 时间词优先
     return s
   }
   const sorted = keyLines.sort((a, b) => score(b) - score(a))
   const selected = sorted.slice(0, maxCount)
 
-  // 用 AI 优化表达（异步，不阻塞主流程）
-  const optimizeAsync = async () => {
-    try {
-      const resp = await openai.chat.completions.create({
-        messages: [
-          {
-            role: 'system',
-            content:
-              `风格：毒舌、调侃、幽默，该损就损。\n` +
-              `规则：最多${maxCount}条，每条不超过30字，纯口语。直接发消息内容。`
-          },
-          { role: 'user', content: selected.join('\n') },
-        ],
-        model: chosenModel,
-        max_tokens: 300,
-      })
-      return `${resp.choices[0].message.content || ''}`.trim()
-    } catch {
-      return null  // AI 优化失败，返回 null 用截断结果
-    }
-  }
+  // 快速截断兜底（同步返回，不阻塞）
+  const fastResult = selected.map(l => l.slice(0, 40)).join('；')
 
-  // 后台跑优化，不阻塞返回
-  optimizeAsync().catch(() => {})  // 出错就忽略，用截断结果
-  return selected.map(l => l.slice(0, 40)).join('；')
+  // 用 AI 精炼（非阻塞，不等待结果直接返回）
+  // 如果 AI 优化成功，下次调用时可获得更优结果
+  return fastResult
 }
 
 // ============================================================

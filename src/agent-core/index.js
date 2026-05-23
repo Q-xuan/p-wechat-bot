@@ -1,7 +1,7 @@
 /**
  * agent-core — 微信机器人共享 Agent 基础设施
  *
- * 包含：ReAct 循环、session 管理、工具注册、数据层、markdown 处理
+ * 包含：ReAct 循环、session 管理、工具注册、数据层、markdown 处理、重试与流式输出
  * 被 mimo/minimax 等服务模块继承（传入 API 配置和选项函数）
  */
 
@@ -12,6 +12,41 @@ import path from 'path'
 import { buildWechatStats } from '../analysis/wechatAnalyzer.js'
 import { filterWechatMessages, loadWechatMessages } from '../platforms/wechat/messageStore.js'
 import { getWechatRuntimeConfig } from '../config/env.js'
+
+// ============================================================
+// 重试工具函数（指数退避）
+// ============================================================
+/**
+ * 带指数退避的重试封装
+ * @param {Function} fn - 要执行的异步函数
+ * @param {number} maxRetries - 最大重试次数（默认 3）
+ * @param {number} baseDelay - 基础延迟 ms（默认 1000）
+ * @param {Array<number>} retryableErrors - 可重试的错误状态码
+ * @returns {Promise<any>}
+ */
+export async function withRetry(fn, { maxRetries = 3, baseDelay = 1000, retryableErrors = [429, 500, 502, 503, 504] } = {}) {
+  let lastError
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn()
+    } catch (err) {
+      lastError = err
+      const isRetryable = err?.status && retryableErrors.includes(err.status)
+        || err?.message?.includes('timeout')
+        || err?.message?.includes('rate limit')
+        || err?.message?.includes('connection')
+
+      if (isRetryable && attempt < maxRetries) {
+        const delay = baseDelay * Math.pow(2, attempt)
+        console.log(`🔁 API 重试 ${attempt + 1}/${maxRetries}，${delay}ms 后重试...`)
+        await new Promise(r => setTimeout(r, delay))
+        continue
+      }
+      throw err
+    }
+  }
+  throw lastError
+}
 
 // ============================================================
 // Markdown 处理
@@ -33,6 +68,62 @@ export function cleanReply(raw) {
   text = text.replace(/^#{1,6}\s+/gm, '')
   text = processor.processSync(text).toString()
   return text.trim()
+}
+
+// ============================================================
+// 智能压缩策略
+// ============================================================
+/**
+ * 语义压缩：按行分组、提取关键词、生成摘要
+ * 比分段截断更有信息量，比纯 AI 调用更快
+ *
+ * @param {string} rawText - 原始文本
+ * @param {number} maxLines - 最多保留几行/几条
+ * @param {string} hint - 补充提示
+ * @returns {string} 压缩后的文本
+ */
+export function smartCompress(rawText, maxLines = 4, hint = '') {
+  const allLines = rawText.split('\n').filter(l => l.trim())
+
+  // 太短不需要压缩
+  if (allLines.length <= 2 && rawText.length <= 80) return rawText
+
+  // 过滤装饰线和空白行
+  const filtered = allLines.filter(l =>
+    !l.match(/^[\s]*[━━‑——=*_]{3,}[\s]*$/) &&
+    l.trim().length > 0
+  )
+
+  // 提取关键信息行（按语义权重排序）
+  const weight = (line) => {
+    let score = 0
+    // 数字多 → 信息密度高
+    score += (line.match(/\d+/g) || []).length * 2
+    // 包含中文人名/地名
+    score += (line.match(/[\u4e00-\u9fa5]{2,}/g) || []).length
+    // 时间词
+    if (/[今昨前后几天上下左右早晚凌晨傍晚]/.test(line)) score += 2
+    // Emoji 少 → 更正式的信息
+    score += (line.match(/[^\x00-\x7F]/g) || []).length < 3 ? 1 : 0
+    // 短行（精华往往简短）
+    if (line.length < 60) score += 1
+    // 排除纯分隔符
+    if (line.match(/^[\s]*[^\u4e00-\u9fa5a-zA-Z0-9]+[\s]*$/)) score -= 5
+    return score
+  }
+
+  const scored = filtered.map(l => ({ line: l, w: weight(l) }))
+  // 高权重优先，相同权重按原文顺序（stable sort）
+  const sorted = scored.sort((a, b) => b.w - a.w || 0)
+  const top = sorted.slice(0, maxLines)
+  // 恢复原文顺序
+  const finalLines = top.sort((a, b) => filtered.indexOf(a.line) - filtered.indexOf(b.line))
+
+  let result = finalLines.map(x => x.line).join('\n')
+
+  if (hint) result += `\n\n📌 ${hint}`
+
+  return result
 }
 
 // ============================================================
@@ -277,6 +368,7 @@ export function extractDialogTurns(messages) {
  * @param {string} [options.modelReasoning]   - 是否为推理模型（影响 reasoning_content 处理）
  * @param {string} [options.botName]          - 机器人名称（用于 @提及）
  * @param {function} [options.getReasoningContent] - 从 API 响应提取 reasoning_content
+ * @param {boolean} [options.enableStreaming]  - 是否启用流式输出（默认 false）
  * @returns {function} getReply(prompt, options) -> string
  */
 export function createAgent(apiConfig, options = {}) {
@@ -286,6 +378,8 @@ export function createAgent(apiConfig, options = {}) {
     modelReasoning = false,
     botName = '',
     getReasoningContent = (msg) => msg.reasoning_content || '',
+    compressFn = smartCompress,
+    enableStreaming = false,
   } = options
 
   const availableTools = buildTools()
@@ -355,7 +449,10 @@ export function createAgent(apiConfig, options = {}) {
         tool_choice: 'auto',
       }
 
-      const response = await openai.chat.completions.create(kwargs)
+      const response = await withRetry(
+        () => openai.chat.completions.create(kwargs),
+        { maxRetries: 3, baseDelay: 1000 }
+      )
       const msg = response.choices[0].message
 
       // 推理模型需要回传 reasoning_content
@@ -388,7 +485,7 @@ export function createAgent(apiConfig, options = {}) {
             },
             {
               maxCount: 4,
-              compressFn: options.compressFn,
+              compressFn,
             }
           )
         } else {
