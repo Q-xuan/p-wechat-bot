@@ -55,9 +55,8 @@ async function compressByRules(rawText, maxCount = 4, hint = '') {
   // 快速截断兜底（同步返回，不阻塞）
   const fastResult = selected.map(l => l.slice(0, 40)).join('；')
 
-  // 用 AI 精炼（非阻塞，不等待结果直接返回）
-  // 如果 AI 优化成功，下次调用时可获得更优结果
-  return fastResult
+  // 快速截断兜底（同步返回，不阻塞）
+  return selected.map(l => l.slice(0, 40)).join('；')
 }
 
 // ============================================================

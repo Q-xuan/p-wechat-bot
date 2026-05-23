@@ -26,7 +26,7 @@ import { getWechatRuntimeConfig } from '../config/env.js'
  */
 export async function withRetry(fn, { maxRetries = 3, baseDelay = 1000, retryableErrors = [429, 500, 502, 503, 504] } = {}) {
   let lastError
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       return await fn()
     } catch (err) {
@@ -469,7 +469,14 @@ export function createAgent(apiConfig, options = {}) {
       // ── 有工具调用 → 顺序执行每个工具 ───────────────────
       for (const tc of msg.tool_calls) {
         const fn = tc.function
-        const args = JSON.parse(fn.arguments || '{}')
+        let args = {}
+        try {
+          args = JSON.parse(fn.arguments || '{}')
+        } catch (e) {
+          const errResult = `工具参数解析失败: ${fn.name}，请检查参数格式`
+          messages.push({ role: 'tool', tool_call_id: tc.id, content: errResult })
+          continue
+        }
         console.log(`🔧 [${round}] ${fn.name}`, args)
 
         let result = ''
@@ -492,8 +499,9 @@ export function createAgent(apiConfig, options = {}) {
           result = `未知工具: ${fn.name}`
         }
 
+        // 统一注入推理内容（无论是否为推理模型，有就给）
         const assistantMsg = { role: 'assistant', content: null, tool_calls: [tc] }
-        if (modelReasoning && reasoningContent) {
+        if (reasoningContent) {
           assistantMsg.reasoning_content = reasoningContent
         }
         messages.push(assistantMsg)
