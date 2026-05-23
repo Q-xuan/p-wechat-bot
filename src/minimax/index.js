@@ -34,37 +34,44 @@ async function compressByAI(rawText, maxCount = 4, hint = '') {
   const lines = rawText.split('\n').filter(l => l.trim().length > 0)
   if (lines.length <= 2 && rawText.length <= 80) return rawText
 
-  const hintText = hint ? `\n用户补充：${hint}` : ''
+  // 内容太长才走 AI 压缩（省 API 调用），短内容直接规则截断
+  if (rawText.length > 500) {
+    const hintText = hint ? `\n用户补充：${hint}` : ''
+    const resp = await openai.chat.completions.create({
+      messages: [
+        {
+          role: 'system',
+          content:
+            `你是"黑瑞"，微信里的毒舌损友。把你收到的长内容拆成简洁的微信消息。\n` +
+            `风格：毒舌、调侃、幽默，该损就损，保持人设。\n` +
+            `规则：最多${maxCount}条，每条不超过30字，纯口语，不解释不补充不准用markdown。${hintText}\n` +
+            `直接发消息内容，不要前缀，每条独立。`
+        },
+        { role: 'user', content: '把下面这段话拆成微信消息：\n\n' + rawText },
+      ],
+      model: chosenModel,
+      max_tokens: 600,
+    })
 
-  const resp = await openai.chat.completions.create({
-    messages: [
-      {
-        role: 'system',
-        content:
-          `你是"黑瑞"，微信里的毒舌损友。把你收到的长内容拆成简洁的微信消息。\n` +
-          `风格：毒舌、调侃、幽默，该损就损，保持人设。\n` +
-          `规则：最多${maxCount}条，每条不超过30字，纯口语，不解释不补充不准用markdown。${hintText}\n` +
-          `直接发消息内容，不要前缀，每条独立。`
-      },
-      { role: 'user', content: '把下面这段话拆成微信消息：\n\n' + rawText },
-    ],
-    model: chosenModel,
-    max_tokens: 600,
-  })
+    let reply = `${resp.choices[0].message.content || ''}`
+    reply = reply.replace(/<think>[\s\S]*?<\/think>/g, '').trim()
+    reply = reply
+      .replace(/\*\*(.+?)\*\*/g, '$1')
+      .replace(/\*(.+?)\*/g, '$1')
+      .replace(/`{1,3}(.+?)`{1,3}/gs, '$1')
+      .replace(/^---+$/gm, '')
+      .replace(/^#{1,6}\s+/gm, '')
 
-  let reply = `${resp.choices[0].message.content || ''}`
-  reply = reply.replace(/<think>[\s\S]*?<\/think>/g, '').trim()
-  reply = reply
-    .replace(/\*\*(.+?)\*\*/g, '$1')
-    .replace(/\*(.+?)\*/g, '$1')
-    .replace(/`{1,3}(.+?)`{1,3}/gs, '$1')
-    .replace(/^---+$/gm, '')
-    .replace(/^#{1,6}\s+/gm, '')
-
-  if (reply.length < 5 && lines.length > 0) {
-    reply = lines.slice(0, 2).join(' ').slice(0, 150)
+    if (reply.length < 5 && lines.length > 0) {
+      reply = lines.slice(0, 2).join(' ').slice(0, 150)
+    }
+    return reply
   }
-  return reply
+
+  // 短内容走规则截断（快，不花 API）
+  const keyLines = lines.slice(-maxCount * 3).filter(l => l.trim())
+  const fastResult = keyLines.slice(0, maxCount).map(l => l.slice(0, 40)).join('；')
+  return fastResult || rawText.slice(0, 150)
 }
 
 // ============================================================

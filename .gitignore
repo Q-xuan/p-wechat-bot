@@ -9,3 +9,5 @@ Chromium.app
 .DS_Store
 data/wechat/messages.jsonl
 .data/wechat/messages.jsonl
+.data/sessions/
+sessions/
