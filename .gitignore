@@ -11,3 +11,4 @@ data/wechat/messages.jsonl
 .data/wechat/messages.jsonl
 .data/sessions/
 sessions/
+.pm2/
