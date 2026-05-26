@@ -35,4 +35,4 @@ fi
 
 PORT="${PYTHON_AGENT_PORT:-3002}"
 cd "$PROJECT_ROOT"
-exec python3 -m uvicorn python_agent.api.server:app --host 0.0.0.0 --port "$PORT" --log-level info
+exec /Users/pyu/.hermes/hermes-agent/venv/bin/python3.11 -m uvicorn python_agent.api.server:app --host 0.0.0.0 --port "$PORT" --log-level info

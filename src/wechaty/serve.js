@@ -97,7 +97,13 @@ async function callPythonAgent({ prompt, sessionId, roomName, askerName, platfor
  * 构建 Python Agent 服务调用函数
  */
 function buildPythonAgentServe(platform) {
-  return async ({ prompt, sessionId, roomName, askerName }) => {
-    return callPythonAgent({ prompt, sessionId, roomName, askerName, platform })
+  return async (question, options = {}) => {
+    return callPythonAgent({
+      prompt: question,
+      sessionId: options.sessionId,
+      roomName: options.roomName,
+      askerName: options.askerName,
+      platform,
+    })
   }
 }

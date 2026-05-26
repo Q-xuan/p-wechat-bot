@@ -18,6 +18,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+# Debug endpoints
+from .debug_env import router as debug_router
+
 # 从 .env 文件直接读取（处理多行值，python-dotenv 会解析失败）
 ENV_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".env")
 if os.path.exists(ENV_FILE):
@@ -47,13 +50,13 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 app = FastAPI(title="Wechat-Bot Python Agent")
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:*,http://127.0.0.1:*").split(","),
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
+app.include_router(debug_router)
 
 
 # ============================================================

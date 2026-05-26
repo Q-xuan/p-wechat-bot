@@ -24,6 +24,9 @@ SESSION_DIR = PROJECT_ROOT / ".data" / "sessions"
 SESSION_TTL_MS = 30 * 60 * 1000  # 30 分钟
 MAX_SESSION_AGE_MS = 7 * 24 * 60 * 60 * 1000  # 7 天
 MAX_TURNS = 10
+# 简单 token 估算：中文≈2 token/字，英文≈0.25 token/字符
+_MAX_TOKEN_ESTIMATE_PER_TURN = 800
+_MAX_TOTAL_TOKEN = 32000  # 留 2K buffer 给 response
 
 # 确保目录存在
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
@@ -52,14 +55,21 @@ def load_session_file(session_id: str) -> Optional[Dict[str, Any]]:
 
 
 def save_session_file(session_id: str, entry: Dict[str, Any]) -> None:
-    """保存 session 到文件"""
+    """保存 session 到文件（原子写：先写临时文件再 rename）"""
     if not session_id:
         return
     path = _session_path(session_id)
+    tmp = path.with_suffix(".tmp")
     try:
-        path.write_text(json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.write_text(json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.rename(path)  # atomic on POSIX
     except Exception as e:
         log.warning("⚠️ session 保存失败: %s", e)
+        if tmp.exists():
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def clean_expired_sessions() -> None:
@@ -110,9 +120,21 @@ def load_session(session_id: str) -> List[Dict[str, str]]:
     return entry.get("turns", [])
 
 
+def _estimate_tokens(text: str) -> int:
+    """粗略估算 token 数：中文×2，英文×0.25"""
+    chinese = len(re.findall(r"[\u4e00-\u9fa5]", text))
+    other = len(re.sub(r"[\u4e00-\u9fa5]", "", text))
+    return chinese * 2 + int(other * 0.25)
+
+
+def _total_tokens(turns: List[Dict[str, str]]) -> int:
+    """估算所有 turns 的总 token 数"""
+    return sum(_estimate_tokens(t.get("content", "") or "") for t in turns)
+
+
 def save_session(session_id: str, turns: List[Dict[str, str]]) -> None:
     """
-    保存对话历史到文件
+    保存对话历史到文件（自动截断防止 token 超限）
 
     Args:
         session_id: session 标识符
@@ -120,9 +142,21 @@ def save_session(session_id: str, turns: List[Dict[str, str]]) -> None:
     """
     if not session_id:
         return
+
+    # Token 上限保护：从最新的往回保留，直到不超限
+    protected_turns = [t for t in turns if t.get("role") == "system"]
+    mutable_turns = [t for t in turns if t.get("role") != "system"]
+
+    while mutable_turns and _total_tokens(protected_turns + mutable_turns) > _MAX_TOTAL_TOKEN:
+        if len(mutable_turns) <= 2:
+            # 保留最近 2 轮即可
+            mutable_turns = mutable_turns[-2:]
+            break
+        mutable_turns.pop(0)  # 从最老开始删
+
     save_session_file(session_id, {
         "ts": int(time_module.time() * 1000),
-        "turns": turns[-MAX_TURNS:],
+        "turns": protected_turns + mutable_turns,
     })
 
 

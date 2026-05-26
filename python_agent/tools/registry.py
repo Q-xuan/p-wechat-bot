@@ -17,7 +17,9 @@ tools/registry.py — 工具注册表（安全设计：最小权限 + MCP 白名
 """
 
 import logging
+import os
 import re
+import asyncio as _asyncio
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -79,9 +81,7 @@ async def call_query_wechat_http(
                     "query": query,
                     "limit": limit,
                 },
-                headers={"Content-Type": "application/json"},
             )
-            response.raise_for_status()
             data = response.json()
             if "error" in data:
                 return f"⚠️ 查询失败: {data['error']}"
@@ -95,11 +95,26 @@ async def call_query_wechat_http(
 
 async def call_search_web(query: str, limit: int = 5) -> str:
     """
-    搜索网页（调用外部搜索 API，无本地 I/O）
-    TODO: 接入 Brave Search 或其他外部搜索 API
+    搜索网页（调用智谱 BigModel web_search_prime MCP）
+    使用官方 MCP Python SDK (StreamableHTTP transport)
     """
-    # 占位实现，等接入搜索 API 后填入
-    return f"🔍 搜索功能待接入，当前无法处理: {query}"
+    from python_agent.tools.mcp_client import get_mcp_client
+
+    api_key = os.getenv("ZHIPU_API_KEY", "").strip()
+    if not api_key or api_key in ("", "***"):
+        return "⚠️ 智谱搜索 API Key 未配置（ZHIPU_API_KEY）"
+
+    enabled = os.getenv("ENABLE_WEB_SEARCH", "true").strip().lower()
+    if enabled not in ("true", "1", "yes"):
+        return "⚠️ 网络搜索已关闭（ENABLE_WEB_SEARCH=false）"
+
+    try:
+        client = await get_mcp_client()
+        result = await client.search(query, limit=limit)
+        return result
+    except Exception as e:
+        log.error("search_web error: %s", e)
+        return f"⚠️ 搜索服务异常: {e}"
 
 
 # ================================================================
@@ -114,7 +129,7 @@ TOOLS: List[Dict[str, Any]] = [
             "description": (
                 "查询微信聊天记录。可查群聊、查某成员、搜关键词。\n"
                 "mode=stats返回统计摘要；mode=search返回匹配的消息列表；\n"
-                "mode=detail返回统计+消息样本；mode=images搜图片/视频/附件。\n"
+                "mode=detail返回统计+样本；mode=images搜图片/视频/附件。\n"
                 "结果自动压缩，无需再调用任何优化工具。"
             ),
             "parameters": {
@@ -132,6 +147,35 @@ TOOLS: List[Dict[str, Any]] = [
                     "limit": {"type": "number", "description": "最多加载条数（默认2000）"},
                 },
                 "required": ["mode"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "searchWeb",
+            "description": (
+                "搜索互联网获取实时信息。当用户问以下问题时必须使用：\n"
+                "- 今天有什么新闻 / 现在热点 / 最新消息\n"
+                "- 查一下 xxx 是什么 / 搜索 xxx\n"
+                "- 帮我找 xxx 相关内容 / 有什么关于 xxx 的\n"
+                "返回格式：标题 + 摘要 + 链接。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "搜索关键词（用简洁的中文关键词，不要加问号或完整句子）",
+                    },
+                    "limit": {
+                        "type": "number",
+                        "description": "最多返回结果条数（默认5条）",
+                    },
+                },
+                "required": ["query"],
+                "additionalProperties": False,
             },
         },
     },
@@ -194,20 +238,27 @@ async def execute_tool(name: str, arguments: Dict[str, Any]) -> str:
             return f"⛔ 参数 '{key}' 过长（>{10000} 字符）— 拒绝执行"
 
     # ---- 执行白名单工具 ----
-    if name == "queryWechat":
-        return await call_query_wechat_http(
-            mode=arguments.get("mode", "stats"),
-            speaker=arguments.get("speaker"),
-            room=arguments.get("room"),
-            friend=arguments.get("friend"),
-            query=arguments.get("query"),
-            limit=arguments.get("limit", 2000),
-        )
-    elif name == "searchWeb":
-        return await call_search_web(
-            query=arguments.get("query", ""),
-            limit=arguments.get("limit", 5),
-        )
+    try:
+        if name == "queryWechat":
+            return await call_query_wechat_http(
+                mode=arguments.get("mode", "stats"),
+                speaker=arguments.get("speaker"),
+                room=arguments.get("room"),
+                friend=arguments.get("friend"),
+                query=arguments.get("query"),
+                limit=arguments.get("limit", 2000),
+            )
+        elif name == "searchWeb":
+            log.info(f"🔍 [execute_tool] searchWeb query={arguments.get('query')} limit={arguments.get('limit')}")
+            result = await call_search_web(
+                query=arguments.get("query", ""),
+                limit=arguments.get("limit", 5),
+            )
+            log.info(f"🔍 [execute_tool] searchWeb result[:100]={result[:100]}")
+            return result
+    except Exception as e:
+        log.error(f"execute_tool({name}) 异常: {e}", exc_info=True)
+        return f"⚠️ 工具执行异常: {e}"
     else:
         # 理论上不会走到这里（白名单已过滤）
         return f"⛔ 工具 '{name}' 在白名单中但未实现"
